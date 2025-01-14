@@ -221,6 +221,64 @@ class UzbekWikiScraper:
                     except Exception as e:
                         print(f"Batch {batch_num} failed: {str(e)}")
 
+    def scrape_from_title_files(self, title_files_dir, output_dir, batch_size=50):
+        """
+        Scrape Wikipedia pages from title CSV files.
+        
+        Args:
+            title_files_dir (str): Directory containing the title CSV files
+            output_dir (str): Directory to save the scraped data
+            batch_size (int): Number of pages to process in each batch
+        """
+        from pathlib import Path
+        import pandas as pd
+        from tqdm import tqdm
+        import time
+        
+        # Create output directory if it doesn't exist
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        # Get all CSV files in the title files directory
+        title_files = list(Path(title_files_dir).glob('*.csv'))
+        
+        for file_num, title_file in enumerate(title_files):
+            print(f"\nProcessing file {file_num + 1}/{len(title_files)}: {title_file.name}")
+            
+            # Read the title CSV file
+            df = pd.read_csv(title_file)
+            titles = df['title'].tolist()
+            
+            # Process titles in batches
+            for batch_num, i in enumerate(range(0, len(titles), batch_size)):
+                batch_titles = titles[i:i + batch_size]
+                batch_data = []
+                
+                print(f"\nProcessing batch {batch_num + 1}/{len(titles)//batch_size + 1}")
+                
+                # Scrape each title in the batch
+                for title in tqdm(batch_titles):
+                    try:
+                        result = self.scrape_page(title)
+                        if result and len(result['text']) > 100:  # Filter out very short articles
+                            # Clean the text
+                            result['text'] = self.cleaner.clean_text(result['text'])
+                            batch_data.append(result)
+                    except Exception as e:
+                        print(f"Error scraping {title}: {str(e)}")
+                        continue
+                    
+                    time.sleep(1)  # Rate limiting
+                
+                # Save the batch if we have data
+                if batch_data:
+                    batch_df = pd.DataFrame(batch_data)
+                    output_file = output_path / f'wiki_content_{file_num}_{batch_num}.csv'
+                    batch_df.to_csv(output_file, index=False)
+                    print(f"Saved batch to {output_file}")
+                    
+                print(f"Processed {len(batch_data)} articles in this batch")
+
 class TextCleaner:
    def __init__(self):
        self.unwanted_sections = ['Havolalar', 'Manbalar', 'Izohlar']
@@ -240,8 +298,12 @@ class TextCleaner:
 
 if __name__ == '__main__':
     scraper = UzbekWikiScraper()
-    # scraper.scrape_category("O'zbekiston")
 
 scraper = UzbekWikiScraper()
 # scraper.scrape_all_articles()
-scraper.parallel_scrape_from_files(batch_size=50, max_workers=4)
+# scraper.parallel_scrape_from_files(batch_size=50, max_workers=4)
+scraper.scrape_from_title_files(
+    title_files_dir='data/titles/latin',
+    output_dir='data/content/latin',
+    batch_size=50
+)
