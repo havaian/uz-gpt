@@ -450,8 +450,8 @@ scraper.parallel_scrape_from_files(
     title_files_dir='data/titles/latin',
     output_dir='data/content/latin',
     output_prefix='wiki_content',
-    batch_size=50,
-    max_workers=4
+    batch_size=500,
+    max_workers=8
 )
 # scraper.parallel_scrape_from_files(
 #     title_files_dir='data/titles/latin',
