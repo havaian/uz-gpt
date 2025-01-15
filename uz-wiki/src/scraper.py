@@ -309,7 +309,7 @@ class UzbekWikiScraper:
                     existing_files.append(output_file)
                     print(f"Saved {len(batch_data)} articles to {output_file}")
 
-    def parallel_scrape_from_files(self, title_files_dir, output_dir, output_prefix="wiki_content", batch_size=50, max_workers=4):
+    def parallel_scrape_from_files(self, title_files_dir, output_dir, output_prefix="wiki_content", batch_size=50, max_workers=4, start_file=None):
         """
         Parallel scrape Wikipedia pages with resume functionality.
         
@@ -319,6 +319,7 @@ class UzbekWikiScraper:
             output_prefix (str): Prefix for output files
             batch_size (int): Number of pages to process in each batch
             max_workers (int): Number of parallel workers
+            start_file (str): Optional filename to start from (overrides resume functionality)
         """
         from concurrent.futures import ThreadPoolExecutor, as_completed
         from pathlib import Path
@@ -343,46 +344,56 @@ class UzbekWikiScraper:
                 time.sleep(1)
             return results
 
-        # Find the last processed title
-        last_title = None
-        existing_files = sorted(list(output_path.glob('*.csv')))
-        if existing_files:
-            try:
-                last_file = existing_files[-1]
-                df = pd.read_csv(last_file)
-                if not df.empty:
-                    last_title = df['title'].iloc[0]
-                    print(f"Last processed title: {last_title}")
-            except Exception as e:
-                print(f"Error reading last file: {e}")
-
         # Get all titles and sort them alphabetically
         all_titles = []
         title_files = sorted(list(Path(title_files_dir).glob('*.csv')))
-        for file in title_files:
-            df = pd.read_csv(file)
-            # Convert all titles to strings
-            titles = [str(title) for title in df['title'].tolist()]
-            all_titles.extend(titles)
+
+        if start_file:
+            # If start_file specified, start from that file
+            start_idx = next((i for i, f in enumerate(title_files) if f.name == start_file), 0)
+            title_files = title_files[start_idx:]
+            for file in title_files:
+                df = pd.read_csv(file)
+                titles = [str(title) for title in df['title'].tolist()]
+                all_titles.extend(titles)
+            print(f"Starting from file {start_file}, found {len(all_titles)} titles")
+        else:
+            # Use resume functionality based on last processed title
+            last_title = None
+            existing_files = sorted(list(output_path.glob('*.csv')))
+            if existing_files:
+                try:
+                    last_file = existing_files[-1]
+                    df = pd.read_csv(last_file)
+                    if not df.empty:
+                        last_title = df['title'].iloc[0]
+                        print(f"Last processed title: {last_title}")
+                except Exception as e:
+                    print(f"Error reading last file: {e}")
+
+            # Get all titles and sort them
+            for file in title_files:
+                df = pd.read_csv(file)
+                titles = [str(title) for title in df['title'].tolist()]
+                all_titles.extend(titles)
+
+            if last_title:
+                try:
+                    start_idx = all_titles.index(str(last_title)) + 1
+                    all_titles = all_titles[start_idx:]
+                    print(f"Continuing from index {start_idx}")
+                except ValueError:
+                    print(f"Couldn't find last title {last_title}, starting from beginning")
 
         all_titles.sort()
-        print(f"Total titles: {len(all_titles)}")
-        
-        # Find where to start
-        if last_title:
-            try:
-                start_idx = all_titles.index(last_title) + 1
-                all_titles = all_titles[start_idx:]
-                print(f"Continuing from index {start_idx}")
-            except ValueError:
-                print(f"Couldn't find last title {last_title}, starting from beginning")
+        print(f"Total titles to process: {len(all_titles)}")
         
         # Split remaining titles into batches
         batches = [all_titles[i:i + batch_size] for i in range(0, len(all_titles), batch_size)]
         print(f"Split into {len(batches)} batches of size {batch_size}")
         
         # Process batches in parallel
-        next_file_num = len(existing_files) + 1
+        next_file_num = len(list(output_path.glob('*.csv'))) + 1
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             future_to_batch = {
                 executor.submit(scrape_batch, batch, i): i 
@@ -430,6 +441,11 @@ scraper = UzbekWikiScraper()
 #     output_dir='data/content/latin',
 #     batch_size=50
 # )
+# scraper.check_processed_batches(
+#     title_files_dir='data/titles/latin',
+#     output_dir='data/content/latin'
+# )
+
 scraper.parallel_scrape_from_files(
     title_files_dir='data/titles/latin',
     output_dir='data/content/latin',
@@ -437,7 +453,10 @@ scraper.parallel_scrape_from_files(
     batch_size=50,
     max_workers=4
 )
-# scraper.check_processed_batches(
+# scraper.parallel_scrape_from_files(
 #     title_files_dir='data/titles/latin',
-#     output_dir='data/content/latin'
+#     output_dir='data/content/latin',
+#     batch_size=50,
+#     max_workers=4,
+#     start_file='titles_batch_0.csv'
 # )
