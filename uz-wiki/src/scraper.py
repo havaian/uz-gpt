@@ -181,53 +181,61 @@ class UzbekWikiScraper:
                 cleaned_data.append(item)
         return cleaned_data
 
-    def parallel_scrape_from_files(self, batch_size=100, max_workers=4):
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        from glob import glob
-        import os
-
-        def scrape_batch(titles):
-            results = []
-            for title in titles:
-                try:
-                    result = self.scrape_page(title)
-                    if result:
-                        results.append(result)
-                except Exception as e:
-                    print(f"Error scraping {title}: {str(e)}")
-                    continue
-                time.sleep(1)
-            return results
-
-        title_files = glob(os.path.join(self.data_dir, 'titles/latin/titles_batch_*.csv'))
-        
-        for file_num, file in enumerate(title_files):
-            print(f"Processing file {file_num + 1}/{len(title_files)}")
-            df = pd.read_csv(file)
-            titles = df['title'].tolist()
-            batches = [titles[i:i + batch_size] for i in range(0, len(titles), batch_size)]
-            
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_batch = {executor.submit(scrape_batch, batch): i for i, batch in enumerate(batches)}
-                
-                for future in as_completed(future_to_batch):
-                    batch_num = future_to_batch[future]
-                    try:
-                        results = future.result()
-                        if results:
-                            cleaned_results = self.clean_and_save(results)
-                            if cleaned_results:
-                                self.save_batch(cleaned_results, f"{file_num}_{batch_num}")
-                    except Exception as e:
-                        print(f"Batch {batch_num} failed: {str(e)}")
-
-    def scrape_from_title_files(self, title_files_dir, output_dir, batch_size=50):
+    def check_processed_batches(self, title_files_dir, output_dir):
         """
-        Scrape Wikipedia pages from title CSV files.
+        Check which batches have been processed by examining output files.
+        
+        Args:
+            title_files_dir (str): Directory containing the title CSV files
+            output_dir (str): Directory containing the output data
+        """
+        from pathlib import Path
+        import pandas as pd
+        import re
+        
+        output_path = Path(output_dir)
+        processed_files = set()
+        
+        print("Checking existing output files...")
+        existing_files = sorted(list(output_path.glob('wiki_content_1_*.csv')))
+        print(f"Found {len(existing_files)} output files")
+        
+        for file in existing_files:
+            print(f"\nChecking {file.name}")
+            try:
+                df = pd.read_csv(file)
+                if not df.empty:
+                    # Get the first title
+                    title = df['title'].iloc[0]
+                    print(f"Found title: {title}")
+                    
+                    # Find which input file contains this title
+                    for batch_file in Path(title_files_dir).glob('titles_batch_*.csv'):
+                        batch_df = pd.read_csv(batch_file)
+                        if title in batch_df['title'].values:
+                            match = re.search(r'titles_batch_(\d+)\.csv', batch_file.name)
+                            if match:
+                                batch_num = int(match.group(1))
+                                processed_files.add(batch_num)
+                                print(f"This comes from batch {batch_num}")
+                                break
+            except Exception as e:
+                print(f"Error reading {file}: {e}")
+
+        print("\nSummary:")
+        print(f"Total processed batches: {len(processed_files)}")
+        if processed_files:
+            print(f"Processed batch numbers: {sorted(list(processed_files))}")
+            print(f"Last processed batch: {max(processed_files)}")
+
+    def scrape_from_title_files(self, title_files_dir, output_dir, output_prefix="wiki_content", batch_size=50):
+        """
+        Scrape Wikipedia pages from title CSV files with resume functionality.
         
         Args:
             title_files_dir (str): Directory containing the title CSV files
             output_dir (str): Directory to save the scraped data
+            output_prefix (str): Prefix for output files (default "wiki_content")
             batch_size (int): Number of pages to process in each batch
         """
         from pathlib import Path
@@ -235,49 +243,164 @@ class UzbekWikiScraper:
         from tqdm import tqdm
         import time
         
-        # Create output directory if it doesn't exist
         output_path = Path(output_dir)
         output_path.mkdir(parents=True, exist_ok=True)
         
-        # Get all CSV files in the title files directory
-        title_files = list(Path(title_files_dir).glob('*.csv'))
+        # Find the last processed title from any output file
+        last_title = None
+        existing_files = sorted(list(output_path.glob('*.csv')))
+        if existing_files:
+            try:
+                last_file = existing_files[-1]
+                df = pd.read_csv(last_file)
+                if not df.empty:
+                    last_title = df['title'].iloc[0]
+                    print(f"Last processed title: {last_title}")
+            except Exception as e:
+                print(f"Error reading last file: {e}")
         
-        for file_num, title_file in enumerate(title_files):
-            print(f"\nProcessing file {file_num + 1}/{len(title_files)}: {title_file.name}")
+        # Get all title CSV files
+        title_files = sorted(list(Path(title_files_dir).glob('*.csv')))
+        print(f"Found {len(title_files)} title files")
+        
+        # Process titles
+        found_last_title = last_title is None  # If no last title, start from beginning
+        for title_file in title_files:
+            print(f"\nReading file: {title_file.name}")
             
-            # Read the title CSV file
+            # Read titles from file
             df = pd.read_csv(title_file)
             titles = df['title'].tolist()
             
-            # Process titles in batches
-            for batch_num, i in enumerate(range(0, len(titles), batch_size)):
-                batch_titles = titles[i:i + batch_size]
+            # Sort titles alphabetically to ensure consistent ordering
+            titles.sort()
+            
+            # Split into batches
+            batches = [titles[i:i + batch_size] for i in range(0, len(titles), batch_size)]
+            
+            for batch_num, batch_titles in enumerate(batches):
+                # Skip until we find the last processed title
+                if not found_last_title:
+                    if last_title in batch_titles:
+                        found_last_title = True
+                    continue
+                
+                print(f"\nProcessing batch {batch_num + 1}/{len(batches)}")
                 batch_data = []
                 
-                print(f"\nProcessing batch {batch_num + 1}/{len(titles)//batch_size + 1}")
-                
-                # Scrape each title in the batch
+                # Process each title in the batch
                 for title in tqdm(batch_titles):
                     try:
                         result = self.scrape_page(title)
-                        if result and len(result['text']) > 100:  # Filter out very short articles
-                            # Clean the text
+                        if result and len(result['text']) > 100:
                             result['text'] = self.cleaner.clean_text(result['text'])
                             batch_data.append(result)
                     except Exception as e:
-                        print(f"Error scraping {title}: {str(e)}")
+                        print(f"Error scraping {title}: {e}")
                         continue
-                    
                     time.sleep(1)  # Rate limiting
                 
                 # Save the batch if we have data
                 if batch_data:
+                    next_file_num = len(existing_files) + 1
+                    output_file = output_path / f'{output_prefix}_{next_file_num}.csv'
                     batch_df = pd.DataFrame(batch_data)
-                    output_file = output_path / f'wiki_content_{file_num}_{batch_num}.csv'
                     batch_df.to_csv(output_file, index=False)
-                    print(f"Saved batch to {output_file}")
-                    
-                print(f"Processed {len(batch_data)} articles in this batch")
+                    existing_files.append(output_file)
+                    print(f"Saved {len(batch_data)} articles to {output_file}")
+
+    def parallel_scrape_from_files(self, title_files_dir, output_dir, output_prefix="wiki_content", batch_size=50, max_workers=4):
+        """
+        Parallel scrape Wikipedia pages with resume functionality.
+        
+        Args:
+            title_files_dir (str): Directory containing the title CSV files
+            output_dir (str): Directory to save the scraped data
+            output_prefix (str): Prefix for output files
+            batch_size (int): Number of pages to process in each batch
+            max_workers (int): Number of parallel workers
+        """
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        from pathlib import Path
+        import pandas as pd
+        from tqdm import tqdm
+        import time
+        
+        output_path = Path(output_dir)
+        output_path.mkdir(parents=True, exist_ok=True)
+        
+        def scrape_batch(titles, batch_id):
+            results = []
+            for title in tqdm(titles, desc=f"Batch {batch_id}", leave=False):
+                try:
+                    result = self.scrape_page(title)
+                    if result and len(result['text']) > 100:
+                        result['text'] = self.cleaner.clean_text(result['text'])
+                        results.append(result)
+                except Exception as e:
+                    print(f"Error scraping {title}: {e}")
+                    continue
+                time.sleep(1)
+            return results
+
+        # Find the last processed title
+        last_title = None
+        existing_files = sorted(list(output_path.glob('*.csv')))
+        if existing_files:
+            try:
+                last_file = existing_files[-1]
+                df = pd.read_csv(last_file)
+                if not df.empty:
+                    last_title = df['title'].iloc[0]
+                    print(f"Last processed title: {last_title}")
+            except Exception as e:
+                print(f"Error reading last file: {e}")
+
+        # Get all titles and sort them alphabetically
+        all_titles = []
+        title_files = sorted(list(Path(title_files_dir).glob('*.csv')))
+        for file in title_files:
+            df = pd.read_csv(file)
+            # Convert all titles to strings
+            titles = [str(title) for title in df['title'].tolist()]
+            all_titles.extend(titles)
+
+        all_titles.sort()
+        print(f"Total titles: {len(all_titles)}")
+        
+        # Find where to start
+        if last_title:
+            try:
+                start_idx = all_titles.index(last_title) + 1
+                all_titles = all_titles[start_idx:]
+                print(f"Continuing from index {start_idx}")
+            except ValueError:
+                print(f"Couldn't find last title {last_title}, starting from beginning")
+        
+        # Split remaining titles into batches
+        batches = [all_titles[i:i + batch_size] for i in range(0, len(all_titles), batch_size)]
+        print(f"Split into {len(batches)} batches of size {batch_size}")
+        
+        # Process batches in parallel
+        next_file_num = len(existing_files) + 1
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_batch = {
+                executor.submit(scrape_batch, batch, i): i 
+                for i, batch in enumerate(batches)
+            }
+            
+            for future in as_completed(future_to_batch):
+                batch_num = future_to_batch[future]
+                try:
+                    results = future.result()
+                    if results:
+                        batch_df = pd.DataFrame(results)
+                        output_file = output_path / f'{output_prefix}_{next_file_num}.csv'
+                        batch_df.to_csv(output_file, index=False)
+                        print(f"\nSaved batch {batch_num} to {output_file} ({len(results)} articles)")
+                        next_file_num += 1
+                except Exception as e:
+                    print(f"\nBatch {batch_num} failed: {e}")
 
 class TextCleaner:
    def __init__(self):
@@ -302,8 +425,19 @@ if __name__ == '__main__':
 scraper = UzbekWikiScraper()
 # scraper.scrape_all_articles()
 # scraper.parallel_scrape_from_files(batch_size=50, max_workers=4)
-scraper.scrape_from_title_files(
+# scraper.scrape_from_title_files(
+#     title_files_dir='data/titles/latin',
+#     output_dir='data/content/latin',
+#     batch_size=50
+# )
+scraper.parallel_scrape_from_files(
     title_files_dir='data/titles/latin',
     output_dir='data/content/latin',
-    batch_size=50
+    output_prefix='wiki_content',
+    batch_size=50,
+    max_workers=4
 )
+# scraper.check_processed_batches(
+#     title_files_dir='data/titles/latin',
+#     output_dir='data/content/latin'
+# )
